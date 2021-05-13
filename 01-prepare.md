@@ -52,10 +52,56 @@ prepared = quantizer.prepare(graph_module,
     
 在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户定义
 
+```python
+propagate_qconfig_(model, flattened_qconfig_dict)
+```
+
 3.2 模块替换
 
 在传播完成量化配置后，可以对每个模块
 
+```python
+if model.training:
+   additional_qat_module_mapping = prepare_custom_config_dict.get(
+                "additional_qat_module_mapping", {})
+   self._qat_swap_modules(model, additional_qat_module_mapping)
+```
+
+我们来看一下_qat_swap_modules函数的内容:
+```python
+
+   def _qat_swap_modules(
+            self, root: torch.nn.Module,
+            additional_qat_module_mapping: Dict[Callable, Callable]) -> None:
+        all_mappings = get_combined_dict(
+            get_default_qat_module_mappings(), additional_qat_module_mapping)
+        convert(root, mapping=all_mappings, inplace=True, remove_qconfig=False)
+
+```
+
+_qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mappiing方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，实现替换。
+
+随着调用栈的深入，我们可以发现convert最终调用了torch/quantization/quantize.py中的_convert函数，
+
+```python
+
+    for name, mod in module.named_children():
+        # both fused modules and observed custom modules are
+        # swapped as one unit
+        if not isinstance(mod, _FusedModule) and \
+           type(mod) not in custom_module_class_mapping:
+            _convert(mod, mapping, True,  # inplace
+                     custom_module_class_mapping)
+        reassign[name] = swap_module(mod, mapping, custom_module_class_mapping)
+
+    for key, value in reassign.items():
+        module._modules[key] = value
+
+    return module
+
+```
+
+为简便起见，我们跳过_convert函数中参数准备的部分，直入正题，看看它是如何实现module到QAT module替换的。以上就是其中替换部分的代码片段，可以看出，此处使用了一个递归实现，当传入该函数的module不是一个FusedModule（也即之前所说的）
 
 4. activation量化节点插入
 
