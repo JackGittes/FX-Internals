@@ -107,6 +107,27 @@ return module
 
 以上即是QAT module的自动替换的过程。
 
+对普通nn.Module与QAT module在Pytorch中区别感兴趣的读者，我们在下面一小节中单独进行了一些介绍，而对于主要想了解FX工作原理的读者，下面一小节可以跳过，完全不影响后续的阅读。
+
+**3.3 nn.Module，QAT module，quantized module的区别**
+
+3.3.1 nn.Module
+
+普通的nn.Module实现在
+
+3.3.2 QAT module
+
+QAT module实现在
+
+3.3.3 quantized module
+
+quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules。
+
+其中intrinsic下的模块均为fused后的操作，目前包含了：
+- **ConvBN（1d/2d/3d）**
+- **ConvBNReLu**（1d/2d/3d）
+- **LinearReLU**
+而torch/nn/qat/modules下的模块与普通nn.Module对应，均为独立的操作。但由于并非所有的nn.Module都存在可量化的实现方式，所以qat/modules下的模块目前都是
 
 
 4. **activation量化节点插入**
