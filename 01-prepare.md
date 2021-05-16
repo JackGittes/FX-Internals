@@ -6,6 +6,8 @@
 
 ***
 
+**本文基于Pytorch版本v1.8.0 (@37c1f4)。**
+
 熟悉QAT流程的读者肯定知道，如果希望对一个模型进行QAT量化，一般需要对网络中的权重（weight）和激活值（activation）进行模拟量化，并在训练中借助模拟量化节点反向传播，对网络进行训练。
 
 一个普通的nn.Module是如何转换得到插入模拟量化节点的模型的呢？在FX中，这个转换过程大体分为四个步骤：
@@ -125,8 +127,9 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 其中intrinsic下的模块均为fused后的操作，目前包含了：
 - **ConvBN（1d/2d/3d）**
-- **ConvBNReLu**（1d/2d/3d）
+- **ConvBNReLu（1d/2d/3d）**
 - **LinearReLU**
+
 而torch/nn/qat/modules下的模块与普通nn.Module对应，均为独立的操作。但由于并非所有的nn.Module都存在可量化的实现方式，所以qat/modules下的模块目前都是
 
 
