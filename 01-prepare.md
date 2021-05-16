@@ -145,6 +145,9 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 一个典型的activation量化插入和节点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中跨层的x和，最终通过
 
+![Residual Block](img/01/residual.png)
+
+
 ```python
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBn1d)
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBn2d)
