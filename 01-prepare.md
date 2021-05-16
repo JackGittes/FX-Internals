@@ -70,16 +70,16 @@ if model.training:
 我们来看一下_qat_swap_modules函数的内容:
 ```python
 
-   def _qat_swap_modules(
-            self, root: torch.nn.Module,
-            additional_qat_module_mapping: Dict[Callable, Callable]) -> None:
+def _qat_swap_modules(
+        self, root: torch.nn.Module,
+        additional_qat_module_mapping: Dict[Callable, Callable]) -> None:
         all_mappings = get_combined_dict(
             get_default_qat_module_mappings(), additional_qat_module_mapping)
-        convert(root, mapping=all_mappings, inplace=True, remove_qconfig=False)
+    convert(root, mapping=all_mappings, inplace=True, remove_qconfig=False)
 
 ```
 
-_qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mappiing方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，实现替换。
+_qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mappiing方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，开始进行替换。
 
 随着调用栈的深入，我们可以发现convert最终调用了torch/quantization/quantize.py中的_convert函数。
 
@@ -87,19 +87,17 @@ _qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtion
 
 ```python
 
-    for name, mod in module.named_children():
-        # both fused modules and observed custom modules are
-        # swapped as one unit
-        if not isinstance(mod, _FusedModule) and \
-           type(mod) not in custom_module_class_mapping:
-            _convert(mod, mapping, True,  # inplace
-                     custom_module_class_mapping)
-        reassign[name] = swap_module(mod, mapping, custom_module_class_mapping)
-
-    for key, value in reassign.items():
-        module._modules[key] = value
-
-    return module
+for name, mod in module.named_children():
+    # both fused modules and observed custom modules are
+    # swapped as one unit
+    if not isinstance(mod, _FusedModule) and \
+       type(mod) not in custom_module_class_mapping:
+        _convert(mod, mapping, True,  # inplace
+                 custom_module_class_mapping)
+    reassign[name] = swap_module(mod, mapping,custom_module_class_mapping)
+for key, value in reassign.items():
+    module._modules[key] = value
+return module
 
 ```
 
