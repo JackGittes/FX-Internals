@@ -139,7 +139,7 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 这是FX量化节点插入中很有特色的一个部分。在进行量化节点插入的过程中，有时候我们会希望根据特定节点之间的连接模式来决定如何插入activation量化。为此，FX中引入了模式匹配机制。这些模式匹配不仅在量化中，在fuse中也被使用，此处我们只介绍量化中的使用。
 
-一个典型的activation量化插入和节点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中跨层的x和，最终通过
+一个典型的activation量化插入和节点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中x和F(x)通过一个elementwise add操作进行了相加并通过一个relu激活函数得到了这个block的输出。这种连接方式也自然而然引出一个问题，实际量化过程中，如果我们只判断relu激活函数，并在之后插入一个activation量化，这似乎没有什么问题，因为add操作紧邻的relu会被量化。但如果add后面没有relu，那我们就会少插入了一个节点。同样地，如果我们寻找所有的add操作，并在每个add后插入一个activation量化，就会存在add -> relu这样的连接重复插入量化节点的问题。因此，以上现象提示，如果能通过判断节点连接模式的方式来判断是否插入activation量化，就有可能解决以上的问题。
 
 ![Residual Block](img/01/residual.png)
 
