@@ -115,7 +115,7 @@ return module
 
 3.3.1 nn.Module
 
-普通的nn.Module实现在
+普通的nn.Module实现在torch/nn/modules下，其中都是我们耳熟能详的一些网络操作，例如Conv1d/2d/3d，Linear，BatchNorm1d/2d/3d，ReLU/Sigmoid/Swish等等。这些模块的forward实际调用了torch.nn.functional中对应的可微分函数，因此可以在反向传播中被优化。
 
 3.3.2 QAT module
 
@@ -135,16 +135,29 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 4. **activation量化节点插入**
 
-以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。尽管FX的图表示支持在一张已创建好的图的任意节点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化节点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的节点的拓扑顺序，依次向空图中拷贝节点，并根据该节点的qconfig是否包含了activation量化配置来决定是否在拷贝节点后插入相应的量化节点。
+以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。尽管FX的图表示支持在一张已创建好的图的任意节点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化节点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的节点的拓扑顺序，依次向空图中拷贝原图中的节点，并根据该节点的qconfig是否包含了activation量化配置来决定是否在拷贝节点后插入相应的量化节点。
 
 了解了FX插入activation量化节点的方式后，我们来具体看一下它的代码实现。
 
-**4.1 创建空图**
+**4.1 量化模式匹配（pattern match）**
 
 
 
+**4.2 创建空图**
 
-**4.1 根据节点类型和QConfig插入量化节点**
+以下为FX中创建空图的代码片段，可以看到，在创建空图的同时，还有其他一些变量也随之创建。
+
+```python
+self.activation_post_process_map = dict()
+env: Dict[Any, Any] = {}
+observed_graph = Graph()
+observed_node_names_set: Set[str] = set()
+```
+
+**4.3 根据节点类型和QConfig插入量化节点**
+
+这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在更新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
+
 
 
 
@@ -152,5 +165,7 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 1. 在FX中如何自定义模块融合策略？
 2. FX中目前已知的一些缺陷和问题？
+   
    1.1 Bias Correction （BC）的实现方式：目前的BC是一个未被公开的API，但用户仍然可以通过调用XX获得BC。
+
 3. 
