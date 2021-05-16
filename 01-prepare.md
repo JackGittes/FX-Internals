@@ -141,6 +141,29 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 **4.1 量化模式匹配（pattern match）**
 
+这是FX量化节点插入中很有特色的一个部分。在进行量化节点插入的过程中，有时候我们会希望根据特定节点之间的连接模式来决定如何插入activation量化。为此，FX中引入了模式匹配机制。这些模式匹配不仅在量化中，在fuse中也被使用，此处我们只介绍量化中的使用。
+
+一个典型的activation量化插入和节点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中跨层的x和，最终通过
+
+```python
+@register_quant_pattern(torch.nn.intrinsic.qat.ConvBn1d)
+@register_quant_pattern(torch.nn.intrinsic.qat.ConvBn2d)
+@register_quant_pattern(torch.nn.intrinsic.qat.ConvBn3d)
+@register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU1d)
+@register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU2d)
+@register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU3d)
+```
+
+```python
+@register_quant_pattern((torch.nn.ReLU, operator.add))
+@register_quant_pattern((torch.nn.ReLU, operator.mul))
+@register_quant_pattern((torch.nn.ReLU, torch.add))
+@register_quant_pattern((torch.nn.ReLU, torch.mul))
+@register_quant_pattern((torch.nn.functional.relu, operator.add))
+@register_quant_pattern((torch.nn.functional.relu, operator.mul))
+@register_quant_pattern((torch.nn.functional.relu, torch.add))
+@register_quant_pattern((torch.nn.functional.relu, torch.mul))
+```
 
 
 **4.2 创建空图**
@@ -156,7 +179,7 @@ observed_node_names_set: Set[str] = set()
 
 **4.3 根据节点类型和QConfig插入量化节点**
 
-这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在更新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
+这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在最新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
 
 
 
