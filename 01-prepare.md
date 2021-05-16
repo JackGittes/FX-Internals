@@ -71,14 +71,12 @@ if model.training:
 
 我们来看一下_qat_swap_modules函数的内容:
 ```python
-
 def _qat_swap_modules(
         self, root: torch.nn.Module,
         additional_qat_module_mapping: Dict[Callable, Callable]) -> None:
         all_mappings = get_combined_dict(
             get_default_qat_module_mappings(), additional_qat_module_mapping)
     convert(root, mapping=all_mappings, inplace=True, remove_qconfig=False)
-
 ```
 
 _qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mappiing方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，开始进行替换。
@@ -88,7 +86,6 @@ _qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtion
 为简便起见，我们跳过_convert函数中参数准备的部分，直入正题，看看它是如何实现module到QAT module替换的。
 
 ```python
-
 for name, mod in module.named_children():
     # both fused modules and observed custom modules are
     # swapped as one unit
@@ -100,7 +97,6 @@ for name, mod in module.named_children():
 for key, value in reassign.items():
     module._modules[key] = value
 return module
-
 ```
 
 以上就是其中替换部分的代码片段，可以看出，此处使用了一个递归实现，当传入该函数的mod不是一个FusedModule，且这个mod没有相应的用户自定义mapping时，就递归执行。当mod满足其中任意一个条件时，则执行swap_module。而swap_module所做的正是把传入的mod根据mapping包含的映射关系，获得其对应的QAT module。
@@ -135,7 +131,7 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 4. **activation量化节点插入**
 
-以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。尽管FX的图表示支持在一张已创建好的图的任意节点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化节点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的节点的拓扑顺序，依次向空图中拷贝原图中的节点，并根据该节点的qconfig是否包含了activation量化配置来决定是否在拷贝节点后插入相应的量化节点。
+以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。尽管FX的图表示支持在一张已创建好的图的任意节点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化节点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的节点的拓扑顺序，依次向空图中拷贝原图中的节点，并根据该节点匹配到的**量化模式**和**qconfig是否包含了activation量化配置**来决定是否在拷贝节点后插入相应的量化节点。
 
 了解了FX插入activation量化节点的方式后，我们来具体看一下它的代码实现。
 
