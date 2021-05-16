@@ -81,7 +81,9 @@ if model.training:
 
 _qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mappiing方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，实现替换。
 
-随着调用栈的深入，我们可以发现convert最终调用了torch/quantization/quantize.py中的_convert函数，
+随着调用栈的深入，我们可以发现convert最终调用了torch/quantization/quantize.py中的_convert函数。
+
+为简便起见，我们跳过_convert函数中参数准备的部分，直入正题，看看它是如何实现module到QAT module替换的。
 
 ```python
 
@@ -101,9 +103,17 @@ _qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtion
 
 ```
 
-为简便起见，我们跳过_convert函数中参数准备的部分，直入正题，看看它是如何实现module到QAT module替换的。以上就是其中替换部分的代码片段，可以看出，此处使用了一个递归实现，当传入该函数的module不是一个FusedModule（也即之前所说的）
+以上就是其中替换部分的代码片段，可以看出，此处使用了一个递归实现，当传入该函数的mod不是一个FusedModule，且这个mod没有相应的用户自定义mapping时，就递归执行。当mod满足其中任意一个条件时，则执行swap_module。而swap_module所做的正是把传入的mod根据mapping包含的映射关系，获得其对应的QAT module。
+
+当然这一步并不会发生真正意义上的替换，仅仅是把各个mod对应的QAT module根据mod的名字放到一个字典（dict）当中。当网络的所有mod都被递归地映射完成，得到所有的[mod name, QAT module]的关系后，再统一进行更新。这里就用到了Pytorch nn.Module的保存模块的一个特性，也即nn.Module所包含的module实际都存储在_modules这个字典当中，通过对这个字典的键值对进行更新就实现了对nn.Module的更新。
+
+以上即是QAT module的自动替换的过程。
+
+
 
 4. activation量化节点插入
+
+以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。
 
 4.1 创建空图
 
