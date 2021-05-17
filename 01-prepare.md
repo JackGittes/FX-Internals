@@ -181,6 +181,103 @@ observed_node_names_set: Set[str] = set()
 这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在最新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
 
 
+**4.3.1 准备工作** *L#461 - L#479*
+
+```python
+def load_arg(a):
+    return map_arg(a, lambda node: env[node.name])
+
+graph_inputs = []
+for node in model.graph.nodes:
+    if node.op == 'placeholder':
+        graph_inputs.append(node.name)
+
+get_new_observer_name = get_new_attr_name_with_prefix(
+    'activation_post_process_')
+
+placeholder_node_seen_cnt = 0
+output_node_seen_cnt = 0
+input_quantized_idxs: List[int] = self.prepare_custom_config_dict.get(
+    "input_quantized_idxs", [])
+output_quantized_idxs: List[int] = self.prepare_custom_config_dict.get(
+    "output_quantized_idxs", [])
+
+result_node : Optional[Node] = None
+```
+
+
+**4.3.2 处理输出节点** *L#480 - L#504*
+
+```python
+for node in model.graph.nodes:
+    if node.op == 'output':
+        # If this output is hardcoded to be quantized, insert an
+        # observer on the previous node if it does not already
+        # exist.
+        cur_output_node_idx = output_node_seen_cnt
+        output_node_seen_cnt += 1
+        if cur_output_node_idx in output_quantized_idxs:
+            prev_node = node.args[0]
+            assert isinstance(prev_node, Node), \
+                ('hardcoding list/dict outputs to be quantized is ' +
+                 'not supported')
+            if prev_node.name not in observed_node_names_set:
+                assert self.qconfig_map is not None
+                local_qconfig = self.qconfig_map[prev_node.name]
+                assert local_qconfig is not None, \
+                    'qconfig of a node before a quantized output must exist'
+                insert_observer(
+                    prev_node, local_qconfig.activation(),
+                    model, self.activation_post_process_map,
+                    env, observed_graph, load_arg, observed_node_names_set)
+
+        observed_graph.output(load_arg(node.args[0]))
+        result_node = node
+        continue
+```
+
+**4.3.2 处理网络中间层节点** *L#509 - L#529*
+
+```python
+if node.name in observed_node_names_set:
+    continue
+
+root_node, matched_nodes, pattern, obj, qconfig = matches.get(
+    node.name, (None, None, None, None, None))
+if root_node is None:
+    env[node.name] = observed_graph.node_copy(node, load_arg)
+elif root_node is node:
+    env[node.name] = observed_graph.node_copy(node, load_arg)
+    # index for input of custom module that needs to be observed in
+    # parent
+    if qconfig is not None:
+        assert obj is not None
+        standalone_module_input_idxs = \
+            maybe_insert_observer_for_special_module(
+                obj, self.modules, prepare_custom_config_dict, qconfig,
+                node)
+        insert_observer_for_output_of_the_node(
+            node, obj, qconfig, self.modules, model, pattern,
+            self.activation_post_process_map, env,
+            observed_graph, load_arg, observed_node_names_set,
+            matched_nodes, standalone_module_input_idxs)
+else:
+    env[node.name] = observed_graph.node_copy(node, load_arg)
+```
+
+**4.3.3 处理输入节点** *L#531 - L#538*
+
+```python
+if node.op == 'placeholder':
+    # skip adding observers at the graph input if the input is
+    # overriden to be quantized
+    cur_placeholder_node_idx = placeholder_node_seen_cnt
+    placeholder_node_seen_cnt += 1
+    if cur_placeholder_node_idx in input_quantized_idxs:
+        observed_node_names_set.add(node.name)
+        continue
+```
+
 
 
 **FAQ汇总**：
