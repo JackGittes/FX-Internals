@@ -1,4 +1,4 @@
-### Prepare流程
+## Prepare流程
 
 ***
 
@@ -8,11 +8,16 @@
 
 **本文基于Pytorch版本v1.8.0 (@37c1f4)。**
 
+### 0. 概述
+
 熟悉QAT流程的读者肯定知道，如果希望对一个模型进行QAT量化，一般需要对网络中的权重（weight）和激活值（activation）进行模拟量化，并在训练中借助模拟量化节点反向传播，对网络进行训练。
+
+<img src="img/01/insert.jpg" alt="Insert" width="300"/>
+
 
 一个普通的nn.Module是如何转换得到插入模拟量化节点的模型的呢？在FX中，这个转换过程大体分为四个步骤：
 
-（1）**符号追踪（symbolic trace）**：获得原始nn.Module网络的图表示
+（1）**符号跟踪（symbolic trace）**：获得原始nn.Module网络的图表示
 
 （2）**模块融合（fuse）**: 此步骤将满足模式的相邻模块融合成nn.Sequential。例如，将相邻的nn.Conv2d和nn.BatchNorm2d打包到一个nn.Sequential内，构成一个FusedModule，此后这个FusedModule将在prepare环节被替换成一个融合的模块。例如nn.Conv2d+nn.BatchNorm2d -> nn.intrinsic.qat.ConvBN2d。
 
@@ -25,7 +30,7 @@
 ***
 
 
-1. **QAT Prepare**
+### 1. **QAT Prepare**
 
 ```python
 prepared = quantizer.prepare(graph_module, 
@@ -39,9 +44,9 @@ prepared = quantizer.prepare(graph_module,
 此处即prepare的入口。
 
 
-3. **模块交换（swap）**
+### 3. **模块交换（swap）**
 
-**3.1 准备工作 —— 传播量化配置（propagate）**
+#### **3.1 准备工作 —— 传播量化配置（propagate）**
     
 在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户定义
 
@@ -49,7 +54,7 @@ prepared = quantizer.prepare(graph_module,
 propagate_qconfig_(model, flattened_qconfig_dict)
 ```
 
-**3.2 模块替换**
+#### **3.2 模块替换**
 
 在传播完成量化配置后，可以对每个模块
 
@@ -98,35 +103,55 @@ return module
 
 对普通nn.Module与QAT module在Pytorch中区别感兴趣的读者，我们在下面一小节中单独进行了一些介绍，而对于主要想了解FX工作原理的读者，下面一小节可以跳过，完全不影响后续的阅读。
 
-**3.3 nn.Module，QAT module，quantized module的区别**
+#### **3.3 nn.Module，QAT module，quantized module的区别**
 
-3.3.1 nn.Module
+**3.3.1 nn.Module**
 
 普通的nn.Module实现在torch/nn/modules下，其中都是我们耳熟能详的一些网络操作，例如Conv1d/2d/3d，Linear，BatchNorm1d/2d/3d，ReLU/Sigmoid/Swish等等。这些模块的forward实际调用了torch.nn.functional中对应的可微分函数，因此可以在反向传播中被优化。
 
-3.3.2 QAT module
+**3.3.2 QAT module**
 
-QAT module实现在
-
-3.3.3 quantized module
-
-quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules。
+QAT module实现在torch/nn/qat/modules和torch/nn/intrinsic/qat/modules中。
 
 其中intrinsic下的模块均为fused后的操作，目前包含了：
 - **ConvBN（1d/2d/3d）**
 - **ConvBNReLu（1d/2d/3d）**
 - **LinearReLU**
 
-而torch/nn/qat/modules下的模块与普通nn.Module对应，均为独立的操作。但由于并非所有的nn.Module都存在可量化的实现方式，所以qat/modules下的模块目前都是
+而torch/nn/qat/modules下的模块与普通nn.Module对应，均为独立的操作。但由于并非所有的nn.Module都存在可量化的实现方式，所以qat/modules下的模块是nn.Module包含操作的一个子集。以QAT Conv2d为例，我们可以看看它们有何异同：
 
+**3.3.3 quantized module**
 
-4. **activation量化节点插入**
+quantized module实现在torch/nn/quantized/modules和torch/nn/intrinsic/quantized/modules中。
+
+我们以quantized Conv2d为例看一下它和nn.Module和QAT module的异同。以下为quantized Conv2d的forward代码片段：
+
+```python
+def forward(self, input):
+     # Temporarily using len(shape) instead of ndim due to JIT issue
+     # https://github.com/pytorch/pytorch/issues/23890
+     if len(input.shape) != 4:
+         raise ValueError("Input shape must be `(N, C, H, W)`!")
+     if self.padding_mode != 'zeros':
+         _reversed_padding_repeated_twice = _reverse_repeat_padding(self.padding)
+         input = F.pad(input, _reversed_padding_repeated_twice,
+                       mode=self.padding_mode)
+     return ops.quantized.conv2d(
+         input, self._packed_params, self.scale, self.zero_point)
+```
+
+尽管quantized module也继承自nn.Module，它的forward函数中调用的却并非functional中的可微分操作，而是torch的原生op。而quantized Conv2d原生op（ops.quantized.conv2d）的实现在aten\src\ATen\native\quantized\cpu\qconv_prepack.cpp中。从目录的名也可推知其义，这是一个真正的量化推理操作，只能够运行在cpu上。没错，它是对量化后的网络进行真正量化推理的模块，因而也不没有反向传播（backward）方法和绑定关系。
+
+### 4. **activation量化节点插入**
 
 以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。尽管FX的图表示支持在一张已创建好的图的任意节点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化节点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的节点的拓扑顺序，依次向空图中拷贝原图中的节点，并根据该节点匹配到的**量化模式**和**qconfig是否包含了activation量化配置**来决定是否在拷贝节点后插入相应的量化节点。
 
 了解了FX插入activation量化节点的方式后，我们来具体看一下它的代码实现。
 
-**4.1 量化模式匹配（pattern match）**
+#### **4.1 量化模式匹配（pattern match）**
+
+
+**4.1.1 量化模式**
 
 这是FX量化节点插入中很有特色的一个部分。在进行量化节点插入的过程中，有时候我们会希望根据特定节点之间的连接模式来决定如何插入activation量化。为此，FX中引入了模式匹配机制。这些模式匹配不仅在量化中，在fuse中也被使用，此处我们只介绍量化中的使用。
 
@@ -134,7 +159,11 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 <img src="img/01/residual.png" alt="Residual Block" width="300"/>
 
-那么FX中的量化模式该如何定义？如何在量化过程中发挥作用呢？关于量化模式的定义都位于torch/quantization/fx/quantization_pattern.py中。以下代码段展示了定义并添加一个简单（单个节点即构成一个模式）的量化模式的方法。对于一个全新的量化模式，我们需要准备两样东西，一个是该模式对应的module表示，也即@register_quant_pattern装饰器传入的参数；另一个是我们需要为这个模式定义相应的QuantizeHandler，以便FX能在convert阶段找到这个模式所对应的转换方法。这里的convert，是指FX在对模型量化完毕之后，转换到相应的量化推理模块（quantized module）的过程，由于我们后面会有专门的篇幅对此进行介绍，在这里便不再展开叙述。不过如果我们只关心量化过程，而不需要或者暂时没有对应的量化推理kernel，QuantizeHandler类的convert部分也可以跳过。
+**4.1.2 定义量化模式**
+
+那么FX中的量化模式该如何定义？如何在量化过程中发挥作用呢？
+
+关于量化模式的定义都位于torch/quantization/fx/quantization_pattern.py中。以下代码段展示了定义并添加一个简单（单个节点即构成一个模式）的量化模式的方法。对于一个全新的量化模式，我们需要准备两样东西，一个是该模式对应的module表示，也即@register_quant_pattern装饰器传入的参数；另一个是我们需要为这个模式定义相应的QuantizeHandler，以便FX能在convert阶段找到这个模式所对应的转换方法。这里的convert，是指FX在对模型量化完毕之后，转换到相应的量化推理模块（quantized module）的过程，由于我们后面会有专门的篇幅对此进行介绍，在这里便不再展开叙述。不过如果我们只关心量化过程，而不需要或者暂时没有对应的量化推理kernel，QuantizeHandler类的convert部分也可以跳过。
 
 ```python
 @register_quant_pattern(torch.cat)
@@ -178,8 +207,12 @@ class Cat(QuantizeHandler):
 @register_quant_pattern((torch.nn.functional.relu, torch.mul))
 ```
 
+**4.1.3 量化模式的匹配**
 
-**4.2 创建空图**
+量化模式的匹配过程，我们可以通过find_matches函数来一窥究竟。
+
+
+#### **4.2 创建空图**
 
 以下为FX中创建空图的代码片段，可以看到，在创建空图的同时，还有其他一些变量也随之创建。
 
@@ -194,7 +227,7 @@ observed_node_names_set: Set[str] = set()
 - observed_graph: Graph module，空图，等待向其中添加节点
 - observed_node_names_set：一个集合，用于记录已经被处理过的节点，防止节点被重复处理
 
-**4.3 根据节点类型和QConfig插入量化节点**
+#### **4.3 根据节点类型和QConfig插入量化节点**
 
 这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在最新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
 
@@ -293,7 +326,7 @@ def insert_observer(
 
 在处理输出节点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间节点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
 
-从注释部分不难看出，insert_observer函数先是尝试获取到model当前所在的device，之后便将observer也发送到该device上（保持了device一致，便于后续训练）。随后，根据节点的名字，为需要插入的observer命名，并使用setattr将这个例化完成的observer添加为model的属性，以便后续调用。而这个observer和节点名称的对应关系也被记录在activation_post_process_map当中。最后便是在相应的图表示上创建相应的节点，这样可以便于后续的代码生成，使得这些observer可以在新代码中被调用。
+从注释部分不难看出，insert_observer函数先是尝试获取到model所在的device，之后便将observer也发送到该device上（保持了device一致，便于后续训练）。随后，根据节点的名字，为需要插入的observer命名，并使用setattr将例化完成的observer添加为model的属性，以便后续调用。而这个observer和节点名称的对应关系也被记录在activation_post_process_map当中。最后便是在相应的图表示上创建相应的节点，这样可以在后续生成代码，这些observer也可以在新代码中被调用。
 
 同时，env中记录的"节点名-输出"的对应关系也从"节点名-当前节点"变成了"节点名-当前节点的observer"。这样后续再次调用load_arg函数查询后继节点的输入参数时，其输入节点便更新成了对应的observer。
 
@@ -328,6 +361,8 @@ else:
 
 **4.3.3 处理输入节点** *L#531 - L#538*
 
+输入节点其实并没有做处理。
+
 ```python
 if node.op == 'placeholder':
     # skip adding observers at the graph input if the input is
@@ -341,7 +376,7 @@ if node.op == 'placeholder':
 
 
 
-**FAQ汇总**：
+### **FAQ汇总**：
 
 1. 在FX中有哪些重要的自定义配置？
    
@@ -379,3 +414,7 @@ if node.op == 'placeholder':
    1.1 Bias Correction （BC）的实现方式：目前的BC是一个未被公开的API，但用户仍然可以通过调用torch/quantization/_correct_bias.py中的bias_correction函数使用BC功能。但需要注意的是，bias_correction只接受经过convert的graph module。而Pytorch支持的quantized module只有CPU上的kernel实现，这就导致了在大数据集/大网络上进行BC的时候计算效率较低，无法使用GPU加速。
 
    1.2 Weight Equalization：
+
+   1.3 ONNX导出：
+
+   1.4 自定义融合模式的Bug：
