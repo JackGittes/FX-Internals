@@ -163,9 +163,6 @@ class Cat(QuantizeHandler):
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBn1d)
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBn2d)
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBn3d)
-@register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU1d)
-@register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU2d)
-@register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU3d)
 ```
 
 
@@ -231,7 +228,7 @@ result_node : Optional[Node] = None
 
 **4.3.2 处理输出节点** *L#480 - L#504*
 
-以下是FX对输出节点的处理逻辑。可以看到，当FX遇到节点对应的op为输出时，该节点的
+以下是FX对输出节点的处理逻辑。当FX遇到节点对应的op为输出时，FX会寻找该节点的输入节点，并尝试在这个输入节点的输出上插入一个observer（Fake Quantize）节点。
 
 ```python
 for node in model.graph.nodes:
@@ -296,6 +293,10 @@ def insert_observer(
 
 在处理输出节点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间节点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
 
+从注释部分不难看出，insert_observer函数先是尝试获取到model当前所在的device，之后便将observer也发送到该device上（保持了device一致，便于后续训练）。随后，根据节点的名字，为需要插入的observer命名，并使用setattr将这个例化完成的observer添加为model的属性，以便后续调用。而这个observer和节点名称的对应关系也被记录在activation_post_process_map当中。最后便是在相应的图表示上创建相应的节点，这样可以便于后续的代码生成，使得这些observer可以在新代码中被调用。
+
+同时，env中记录的"节点名-输出"的对应关系也从"节点名-当前节点"变成了"节点名-当前节点的observer"。这样后续再次调用load_arg函数查询后继节点的输入参数时，其输入节点便更新成了对应的observer。
+
 **4.3.2 处理网络中间层节点** *L#509 - L#529*
 
 ```python
@@ -343,6 +344,16 @@ if node.op == 'placeholder':
 **FAQ汇总**：
 
 1. 在FX中有哪些重要的自定义配置？
+   
+问题的答案就在prepare函数的注释当中，prepare实际上支持了比较丰富的自定义配置。
+- 自定义模块融合方法：
+  - 字段："additional_fuser_method_mapping"，值为用户自定义的融合方法。例子，当我们有自己的Conv2d和BN的融合方式，希望替代FX官方默认的融合方式时，即可使用这个选项，通过定义"模式 - 融合方法"这样的字典项来实现对默认融合方式的替换。
+  
+- 自定义nn.Module和QAT module的映射方式：如果我们自行实现了某个nn.Module的QAT module并希望在QAT训练中使用时，即可按照以上自定义融合方法类似的方式，通过传入这个额外配置来实现对默认QAT module映射的替换。
+  
+- 自定义融合模式：
+  
+- 自定义量化模式：如果我们希望定义一个新的量化模式，那么通过自定义这个模式对应的QuantizeHandler，之后传入包含"模式-QuantizeHandler"的字典项即可。
 
 ```python
 # Additional fuser_method mapping
@@ -355,16 +366,16 @@ if node.op == 'placeholder':
 },
 # Additional fusion patterns
 "additional_fusion_pattern": {
-   (torch.nn.BatchNorm2d, torch.nn.Conv2d:ConvReluFusionhandler
+   (torch.nn.BatchNorm2d, torch.nn.Conv2d): ConvReluFusionhandler
 },
 # Additional quantization patterns
 "additional_quant_pattern": {
    torch.nn.Conv2d: ConvReluQuantizeHandler,
-   (torch.nn.ReLU, torch.nn.Conv2d):ConvReluQuantizeHandler,
+   (torch.nn.ReLU, torch.nn.Conv2d): ConvReluQuantizeHandler,
 }
 ```
 2. FX中目前已知的一些缺陷和问题？
    
-   1.1 Bias Correction （BC）的实现方式：目前的BC是一个未被公开的API，但用户仍然可以通过调用XX获得BC。
+   1.1 Bias Correction （BC）的实现方式：目前的BC是一个未被公开的API，但用户仍然可以通过调用torch/quantization/_correct_bias.py中的bias_correction函数使用BC功能。但需要注意的是，bias_correction只接受经过convert的graph module。而Pytorch支持的quantized module只有CPU上的kernel实现，这就导致了在大数据集/大网络上进行BC的时候计算效率较低，无法使用GPU加速。
 
-3. 
+   1.2 Weight Equalization：
