@@ -36,31 +36,38 @@
 
 #### **3.1 准备工作 —— 传播量化配置（propagate）**
     
-在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户通过module的名字指定其qconfig。
+传播量化配置的propagate_qconfig_函数接受两个参数作为输入，其一为待量化的graph module，其二为指定module量化方式的flattened_qconfig_dict。
 
 ```python
 propagate_qconfig_(model, flattened_qconfig_dict)
 ```
 
+propagate_qconfig_实际调用的是_propagate_qconfig_helper函数。这是一个递归实现的函数，当module存在named_children时，该函数会递归地为途径到的每个module使用setattr方法增加一个qconfig属性，而这个qconfig属性即来自于我们传入的flattened_qconfig_dict。
 
+同时，在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户通过module的名字指定其qconfig。
 
 ```python
-module_qconfig = qconfig_dict.get(type(module), qconfig_parent)
-module_qconfig = qconfig_dict.get(prefix, module_qconfig)
-module_qconfig = getattr(module, 'qconfig', module_qconfig)
+def _propagate_qconfig_helper(module, qconfig_dict, allow_list=None,
+                              qconfig_parent=None, prefix=''):
+    if allow_list is None:
+        allow_list = get_default_qconfig_propagation_list()
 
-torch.quantization.qconfig.assert_valid_qconfig(module_qconfig, module)
+    module_qconfig = qconfig_dict.get(type(module), qconfig_parent)
+    module_qconfig = qconfig_dict.get(prefix, module_qconfig)
+    module_qconfig = getattr(module, 'qconfig', module_qconfig)
 
-module.qconfig = module_qconfig
-for name, child in module.named_children():
-    module_prefix = prefix + '.' + name if prefix else name
-    _propagate_qconfig_helper(child, qconfig_dict, allow_list,
-                              module_qconfig, module_prefix)
+    torch.quantization.qconfig.assert_valid_qconfig(module_qconfig, module)
+
+    module.qconfig = module_qconfig
+    for name, child in module.named_children():
+        module_prefix = prefix + '.' + name if prefix else name
+        _propagate_qconfig_helper(child, qconfig_dict, allow_list,
+                                  module_qconfig, module_prefix)
 ```
 
 #### **3.2 模块替换**
 
-在传播完成量化配置后，即可将每个nn.Module转换为QAT module。
+在传播完成量化配置后，即可将每个nn.Module转换为QAT module，这时候就用到了_qat_swap_module方法。
 
 ```python
 if model.training:
@@ -69,7 +76,7 @@ if model.training:
    self._qat_swap_modules(model, additional_qat_module_mapping)
 ```
 
-我们来看一下_qat_swap_modules函数的内容:
+我们来看一下_qat_swap_modules方法的内容:
 ```python
 def _qat_swap_modules(
         self, root: torch.nn.Module,
@@ -79,7 +86,7 @@ def _qat_swap_modules(
     convert(root, mapping=all_mappings, inplace=True, remove_qconfig=False)
 ```
 
-_qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mapping方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，开始进行替换。
+_qat_swap_module方法先对默认的qat_module_mapping和用户提供的addtional_qat_mapping方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，开始进行替换。
 
 随着调用栈的深入，我们可以发现convert最终调用了torch/quantization/quantize.py中的_convert函数。
 
@@ -111,7 +118,7 @@ return module
 
 **3.3.1 nn.Module**
 
-普通的nn.Module实现在torch/nn/modules下，其中都是我们耳熟能详的一些网络操作，例如Conv1d/2d/3d，Linear，BatchNorm1d/2d/3d，ReLU/Sigmoid/Swish等等。这些模块的forward实际调用了torch.nn.functional中对应的可微分函数，因此可以在反向传播中被优化。
+普通的nn.Module实现在torch/nn/modules下，其中都是我们耳熟能详的一些网络操作，例如Conv1d/2d/3d，Linear，BatchNorm1d/2d/3d，ReLU/Sigmoid/Swish等等。这些模块的forward实际调用了torch.nn.functional中对应的可微分函数，因此通过反向传播被优化。
 
 **3.3.2 QAT module**
 
@@ -158,7 +165,7 @@ def forward(self, input):
 
 **4.1.1 量化模式**
 
-一个典型的activation量化插入和结点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中x和F(x)通过一个elementwise add操作进行了相加并通过一个relu激活函数得到了这个block的输出。这种连接方式也自然而然引出一个问题，实际量化过程中，如果我们只判断relu激活函数，并在之后插入一个activation量化，这似乎没有什么问题，因为add操作紧邻的relu会被量化。但如果add后面没有relu，那我们就会少插入了一个结点。同样地，如果我们寻找所有的add操作，并在每个add后插入一个activation量化，就会存在add -> relu这样的连接重复插入量化结点的问题。因此，以上现象提示，如果能通过判断结点连接模式的方式来判断是否插入activation量化，就有可能解决以上的问题。
+一个典型的activation量化插入和结点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中x和F(x)通过一个elementwise add操作进行了相加并通过一个relu激活函数得到了这个block的输出。这种连接方式也自然而然引出一个问题，实际量化过程中，如果我们只判断relu激活函数，并在之后插入一个activation量化，这似乎没有什么问题，因为add操作紧邻的relu会被量化。但如果add后面没有relu，那我们就会少插入了一个结点。反之，如果我们寻找所有的add操作，并在每个add后插入一个activation量化，就会存在add -> relu这样的连接被重复插入量化结点的问题。因此，以上现象提示，如果能通过判断结点连接模式的方式来决定是否插入activation量化，就有可能解决此类问题。
 
 <img src="img/01/residual.png" alt="Residual Block" width="300"/>
 
