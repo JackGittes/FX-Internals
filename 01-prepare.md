@@ -185,7 +185,27 @@ observed_node_names_set: Set[str] = set()
 
 **FAQ汇总**：
 
-1. 在FX中如何自定义模块融合策略？
+1. 在FX中有哪些重要的自定义配置？
+
+```python
+# Additional fuser_method mapping
+"additional_fuser_method_mapping": {
+   (torch.nn.Conv2d, torch.nn.BatchNorm2d): fuse_conv_bn
+},
+# Additioanl module mapping for qat
+"additional_qat_module_mapping": {
+   torch.nn.intrinsic.ConvBn2d: torch.nn.qat.ConvBn2d
+},
+# Additional fusion patterns
+"additional_fusion_pattern": {
+   (torch.nn.BatchNorm2d, torch.nn.Conv2d:ConvReluFusionhandler
+},
+# Additional quantization patterns
+"additional_quant_pattern": {
+   torch.nn.Conv2d: ConvReluQuantizeHandler,
+   (torch.nn.ReLU, torch.nn.Conv2d):ConvReluQuantizeHandler,
+}
+```
 2. FX中目前已知的一些缺陷和问题？
    
    1.1 Bias Correction （BC）的实现方式：目前的BC是一个未被公开的API，但用户仍然可以通过调用XX获得BC。
