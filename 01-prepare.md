@@ -24,15 +24,6 @@
 
 ***
 
-0. **预备内容**
-   
-FX中的核心数据结构（包括量化相关的部分）目前基本分布在torch/fx和torch/quantization两个文件夹下：
-   - Node：在torch/fx/node.py
-   - Graph：在
-   - GraphModule：在
-   - FakeQuantize：在torch/quantization/fake_quantize
-   - Observer：
-   - QConfig：QConfig中定义了weight和activation的量化方式
 
 1. **QAT Prepare**
 
@@ -141,7 +132,31 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 
 一个典型的activation量化插入和节点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中x和F(x)通过一个elementwise add操作进行了相加并通过一个relu激活函数得到了这个block的输出。这种连接方式也自然而然引出一个问题，实际量化过程中，如果我们只判断relu激活函数，并在之后插入一个activation量化，这似乎没有什么问题，因为add操作紧邻的relu会被量化。但如果add后面没有relu，那我们就会少插入了一个节点。同样地，如果我们寻找所有的add操作，并在每个add后插入一个activation量化，就会存在add -> relu这样的连接重复插入量化节点的问题。因此，以上现象提示，如果能通过判断节点连接模式的方式来判断是否插入activation量化，就有可能解决以上的问题。
 
-![Residual Block](img/01/residual.png)
+<img src="img/01/residual.png" alt="Residual Block" width="300"/>
+
+那么FX中的量化模式该如何定义？如何在量化过程中发挥作用呢？关于量化模式的定义都位于torch/quantization/fx/quantization_pattern.py中。以下代码段展示了定义并添加一个简单（单个节点即构成一个模式）的量化模式的方法。对于一个全新的量化模式，我们需要准备两样东西，一个是该模式对应的module表示，也即@register_quant_pattern装饰器传入的参数；另一个是我们需要为这个模式定义相应的QuantizeHandler，以便FX能在convert阶段找到这个模式所对应的转换方法。这里的convert，是指FX在对模型量化完毕之后，转换到相应的量化推理模块（quantized module）的过程，由于我们后面会有专门的篇幅对此进行介绍，在这里便不再展开叙述。不过如果我们只关心量化过程，而不需要或者暂时没有对应的量化推理kernel，QuantizeHandler类的convert部分也可以跳过。
+
+```python
+@register_quant_pattern(torch.cat)
+class Cat(QuantizeHandler):
+    def convert(self, quantizer: QuantizerCls, node: Node, load_arg: Callable,
+                debug: bool = False,
+                convert_custom_config_dict: Dict[str, Any] = None) -> Node:
+        if not self.all_node_args:
+            return NotImplemented
+        activation_post_process = quantizer.activation_post_process_map[node.name]
+        scale, zero_point = activation_post_process.calculate_qparams()
+        scale = float(scale)
+        zero_point = int(zero_point)
+
+        scale_arg, zero_point_arg = create_qparam_nodes(quantizer, node.name, scale, zero_point)
+
+        kwargs = {**load_arg(quantized=False)(node.kwargs), 'scale': scale_arg, 'zero_point': zero_point_arg}
+        return quantizer.quantized_graph.create_node(
+            'call_function', torch.ops.quantized.cat, load_arg(quantized=[0])(node.args), kwargs)
+```
+
+当然，有时候很多节点可以复用一个QuantizeHandler，也即它们的convert操作是类似的，这时我们就可以在定义QuantizeHandler的上方对这些模式一起进行注册。不过需要注意的是，由于装饰器的作用顺序问题，会导致处在下方的模式会优先被匹配。
 
 
 ```python
@@ -152,6 +167,8 @@ quantized module实现在torch\nn\qat\modules和torch\nn\intrinsic\qat\modules�
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU2d)
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBnReLU3d)
 ```
+
+
 
 ```python
 @register_quant_pattern((torch.nn.ReLU, operator.add))
@@ -176,12 +193,18 @@ observed_graph = Graph()
 observed_node_names_set: Set[str] = set()
 ```
 
+- env: 一个字典，用于记录"节点名 - 输出节点"的关系
+- observed_graph: Graph module，空图，等待向其中添加节点
+- observed_node_names_set：一个集合，用于记录已经被处理过的节点，防止节点被重复处理
+
 **4.3 根据节点类型和QConfig插入量化节点**
 
 这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在最新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
 
 
 **4.3.1 准备工作** *L#461 - L#479*
+
+这里首先定义了一个load_arg函数，实际上这个load_arg函数就是在env中取出对应节点的输出节点。
 
 ```python
 def load_arg(a):
@@ -207,6 +230,8 @@ result_node : Optional[Node] = None
 
 
 **4.3.2 处理输出节点** *L#480 - L#504*
+
+以下是FX对输出节点的处理逻辑。可以看到，当FX遇到节点对应的op为输出时，该节点的
 
 ```python
 for node in model.graph.nodes:
@@ -235,6 +260,10 @@ for node in model.graph.nodes:
         result_node = node
         continue
 ```
+
+**深入insert_observer函数**
+
+在处理输出节点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间节点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
 
 **4.3.2 处理网络中间层节点** *L#509 - L#529*
 
