@@ -17,9 +17,9 @@
 
 一个普通的nn.Module是如何转换得到插入模拟量化节点的模型的呢？在FX中，这个转换过程大体分为四个步骤：
 
-（1）**符号跟踪（symbolic trace）**：获得原始nn.Module网络的图表示
+（1）**符号跟踪（symbolic trace）**：通过对原网络的代码执行过程进行trace，建立原始nn.Module网络的图表示。
 
-（2）**模块融合（fuse）**: 此步骤将满足模式的相邻模块融合成nn.Sequential。例如，将相邻的nn.Conv2d和nn.BatchNorm2d打包到一个nn.Sequential内，构成一个FusedModule，此后这个FusedModule将在prepare环节被替换成一个融合的模块。例如nn.Conv2d+nn.BatchNorm2d -> nn.intrinsic.qat.ConvBN2d。
+（2）**模块融合（fuse）**: 此步骤将满足模式的相邻模块融合成nn.Sequential。例如，将相邻的nn.Conv2d和nn.BatchNorm2d打包到一个nn.Sequential内，构成一个FusedModule，此后这个FusedModule将在prepare环节被替换成一个融合的模块。例如nn.Conv2d+nn.BatchNorm2d -> nn.intrinsic.qat.ConvBn2d。
 
 （3）**模块交换（swap）**：此步骤是为了实现weight的模拟量化。由于nn.Conv2d中的weight是不带模拟量化（Fake Quantize）功能的，为了实现QAT中的模拟量化，需要把所有普通模块替换成可以进行模拟量化的QAT module，而这些module一般都定义在torch.nn.qat当中。torch官方已经对这些模拟量化module的forward和backward进行了实现，可以在训练过程中实现反向传播。例如nn.Conv2d -> nn.qat.intrinsic.Conv2d。
 
@@ -48,10 +48,26 @@ prepared = quantizer.prepare(graph_module,
 
 #### **3.1 准备工作 —— 传播量化配置（propagate）**
     
-在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户定义
+在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户通过module的名字指定其qconfig。
 
 ```python
 propagate_qconfig_(model, flattened_qconfig_dict)
+```
+
+
+
+```python
+module_qconfig = qconfig_dict.get(type(module), qconfig_parent)
+module_qconfig = qconfig_dict.get(prefix, module_qconfig)
+module_qconfig = getattr(module, 'qconfig', module_qconfig)
+
+torch.quantization.qconfig.assert_valid_qconfig(module_qconfig, module)
+
+module.qconfig = module_qconfig
+for name, child in module.named_children():
+    module_prefix = prefix + '.' + name if prefix else name
+    _propagate_qconfig_helper(child, qconfig_dict, allow_list,
+                              module_qconfig, module_prefix)
 ```
 
 #### **3.2 模块替换**
@@ -75,7 +91,7 @@ def _qat_swap_modules(
     convert(root, mapping=all_mappings, inplace=True, remove_qconfig=False)
 ```
 
-_qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mappiing方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，开始进行替换。
+_qat_swap_module函数先对默认的qat_module_mapping和用户提供的addtional_qat_mapping方式进行合并，得到网络整体的QAT module的映射方式，之后调用convert函数，将graph module和mapping方式一并作为参数传入，开始进行替换。
 
 随着调用栈的深入，我们可以发现convert最终调用了torch/quantization/quantize.py中的_convert函数。
 
@@ -378,7 +394,7 @@ if node.op == 'placeholder':
 
 ### **FAQ汇总**：
 
-1. 在FX中有哪些重要的自定义配置？
+#### 1. 在FX中有哪些重要的自定义配置？
    
 问题的答案就在prepare函数的注释当中，prepare实际上支持了比较丰富的自定义配置。
 - 自定义模块融合方法：
@@ -409,12 +425,17 @@ if node.op == 'placeholder':
    (torch.nn.ReLU, torch.nn.Conv2d): ConvReluQuantizeHandler,
 }
 ```
-2. FX中目前已知的一些缺陷和问题？
+
+- 此外，还可以指定网络中特定module的qconfig。
+
+#### 2. FX中目前已知的一些缺陷和问题？
    
    1.1 Bias Correction （BC）的实现方式：目前的BC是一个未被公开的API，但用户仍然可以通过调用torch/quantization/_correct_bias.py中的bias_correction函数使用BC功能。但需要注意的是，bias_correction只接受经过convert的graph module。而Pytorch支持的quantized module只有CPU上的kernel实现，这就导致了在大数据集/大网络上进行BC的时候计算效率较低，无法使用GPU加速。
 
-   1.2 Weight Equalization：
+   1.2 Weight Equalization：不支持组卷积。
 
-   1.3 ONNX导出：
+   1.3 ONNX导出：因为量化模块的pre_packed params的问题，目前QAT模型无法直接导出到ONNX。
 
    1.4 自定义融合模式的Bug：
+
+#### 3. 如果希望为FX添加自定义功能，有什么好的方式？ 
