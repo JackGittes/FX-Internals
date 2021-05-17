@@ -263,6 +263,37 @@ for node in model.graph.nodes:
 
 **深入insert_observer函数**
 
+```python
+def insert_observer(
+        node: Node, observer: torch.quantization.ObserverBase,
+        model: torch.nn.Module,
+        activation_post_process_map: Dict[str, torch.quantization.ObserverBase],
+        env: Dict[Any, Any], observed_graph: Graph, load_arg: Callable,
+        observed_node_names_set: Set[str]):
+    """Insert observer for node by modifying the observed_graph and
+       attach observer module to the model
+       Args:
+         node: Node
+         observer: observer/fake_quantize module instance
+    """
+    # respect device affinity when adding observers
+    model_device = assert_and_get_unique_device(model)
+    if model_device:
+        observer.to(model_device)
+    # add observer module as attribute
+    prefix = node.name + '_activation_post_process_'
+    get_new_observer_name = get_new_attr_name_with_prefix(prefix)
+    observer_name = get_new_observer_name(model)
+    setattr(model, observer_name, observer)
+    # put observer instance activation_post_process map
+    assert activation_post_process_map is not None
+    activation_post_process_map[node.name] = observer
+    # insert observer call
+    env[node.name] = observed_graph.create_node(
+        'call_module', observer_name, (load_arg(node),), {})
+    observed_node_names_set.add(node.name)
+```
+
 在处理输出节点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间节点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
 
 **4.3.2 处理网络中间层节点** *L#509 - L#529*
