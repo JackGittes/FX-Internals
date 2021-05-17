@@ -1,21 +1,16 @@
 ## Prepare流程
 
-***
-
-> 工欲善其事必先利其器 -- 《论语·卫灵公》
-
-***
 
 **本文基于Pytorch版本v1.8.0 (@37c1f4)。**
 
 ### 0. 概述
 
-熟悉QAT流程的读者肯定知道，如果希望对一个模型进行QAT量化，一般需要对网络中的权重（weight）和激活值（activation）进行模拟量化，并在训练中借助模拟量化节点反向传播，对网络进行训练。
+熟悉QAT流程的读者肯定知道，如果希望对一个模型进行QAT量化，一般需要对网络中的权重（weight）和激活值（activation）进行模拟量化，并在训练中借助模拟量化结点反向传播，对网络进行训练。
 
 <img src="img/01/insert.jpg" alt="Insert" width="300"/>
 
 
-一个普通的nn.Module是如何转换得到插入模拟量化节点的模型的呢？在FX中，这个转换过程大体分为四个步骤：
+一个普通的nn.Module是如何转换得到插入模拟量化结点的模型的呢？在FX中，这个转换过程大体分为四个步骤：
 
 （1）**符号跟踪（symbolic trace）**：通过对原网络的代码执行过程进行trace，建立原始nn.Module网络的图表示。
 
@@ -23,25 +18,18 @@
 
 （3）**模块交换（swap）**：此步骤是为了实现weight的模拟量化。由于nn.Conv2d中的weight是不带模拟量化（Fake Quantize）功能的，为了实现QAT中的模拟量化，需要把所有普通模块替换成可以进行模拟量化的QAT module，而这些module一般都定义在torch.nn.qat当中。torch官方已经对这些模拟量化module的forward和backward进行了实现，可以在训练过程中实现反向传播。例如nn.Conv2d -> nn.qat.intrinsic.Conv2d。
 
-（4）**activation量化节点插入（insert observer）**：此步骤是为了实现对activation的模拟量化（或者在PTQ中插入观察节点，实现对激活值数据分布的观察）。
+（4）**activation量化结点插入（insert observer）**：此步骤是为了实现对activation的模拟量化（或者在PTQ中插入观察结点，实现对激活值数据分布的观察）。
 
 以上即为一个普通的nn.Module转换为一个可进行QAT的graph module的大致流程。本文后续内容将深入每个环节对其中包含的诸多操作进行拆解，条分缕析。
 
 ***
 
 
-### 1. **QAT Prepare**
+### 1. **符号跟踪（Symbolic Trace）**
 
-```python
-prepared = quantizer.prepare(graph_module, 
-                             qconfig_dict,
-                             tracer.node_name_to_scope,
-                             prepare_custom_config_dict=prepare_custom_config_dict,
-                             is_standalone_module=is_standalone_module
-                            )
-```
+符号跟踪在前一节我们已经做了详细地介绍，此处不再重复叙述。
 
-此处即prepare的入口。
+### 2. **模块融合（fuse）**
 
 
 ### 3. **模块交换（swap）**
@@ -72,7 +60,7 @@ for name, child in module.named_children():
 
 #### **3.2 模块替换**
 
-在传播完成量化配置后，可以对每个模块
+在传播完成量化配置后，即可将每个nn.Module转换为QAT module。
 
 ```python
 if model.training:
@@ -158,20 +146,19 @@ def forward(self, input):
 
 尽管quantized module也继承自nn.Module，它的forward函数中调用的却并非functional中的可微分操作，而是torch的原生op。而quantized Conv2d原生op（ops.quantized.conv2d）的实现在aten\src\ATen\native\quantized\cpu\qconv_prepack.cpp中。从目录的名也可推知其义，这是一个真正的量化推理操作，只能够运行在cpu上。没错，它是对量化后的网络进行真正量化推理的模块，因而也不没有反向传播（backward）方法和绑定关系。
 
-### 4. **activation量化节点插入**
+### 4. **activation量化结点插入**
 
-以上我们看到了FX是如何实现对weight量化节点的引入的，接下来我们可以看一下FX是如何实现对activation节点的插入。尽管FX的图表示支持在一张已创建好的图的任意节点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化节点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的节点的拓扑顺序，依次向空图中拷贝原图中的节点，并根据该节点匹配到的**量化模式**和**qconfig是否包含了activation量化配置**来决定是否在拷贝节点后插入相应的量化节点。
+以上我们看到了FX是如何实现对weight量化结点的引入的，接下来我们可以看一下FX是如何实现对activation结点的插入。尽管FX的图表示支持在一张已创建好的图的任意结点前后进行插入和删除操作，目前FX却没有采用这种方式来进行activation量化结点的插入。相反地，FX采取的策略是：直接创建一张空图，然后按照原网络对应图表示的结点的拓扑顺序，依次向空图中拷贝原图中的结点，并根据该结点匹配到的**量化模式**和**qconfig是否包含了activation量化配置**来决定是否在拷贝结点后插入相应的量化结点。
 
-了解了FX插入activation量化节点的方式后，我们来具体看一下它的代码实现。
+了解了FX插入activation量化结点的方式后，我们来具体看一下它的代码实现。
 
 #### **4.1 量化模式匹配（pattern match）**
 
+这是FX量化结点插入中很有特色的一个部分。在进行量化结点插入的过程中，有时候我们会希望根据特定结点之间的连接模式来决定如何插入activation量化。为此，FX中引入了模式匹配机制。这些模式匹配不仅在量化中，在fuse中也被使用，此处我们只介绍量化中的使用。
 
 **4.1.1 量化模式**
 
-这是FX量化节点插入中很有特色的一个部分。在进行量化节点插入的过程中，有时候我们会希望根据特定节点之间的连接模式来决定如何插入activation量化。为此，FX中引入了模式匹配机制。这些模式匹配不仅在量化中，在fuse中也被使用，此处我们只介绍量化中的使用。
-
-一个典型的activation量化插入和节点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中x和F(x)通过一个elementwise add操作进行了相加并通过一个relu激活函数得到了这个block的输出。这种连接方式也自然而然引出一个问题，实际量化过程中，如果我们只判断relu激活函数，并在之后插入一个activation量化，这似乎没有什么问题，因为add操作紧邻的relu会被量化。但如果add后面没有relu，那我们就会少插入了一个节点。同样地，如果我们寻找所有的add操作，并在每个add后插入一个activation量化，就会存在add -> relu这样的连接重复插入量化节点的问题。因此，以上现象提示，如果能通过判断节点连接模式的方式来判断是否插入activation量化，就有可能解决以上的问题。
+一个典型的activation量化插入和结点连接模式有关的例子是elementwise add。下图中展示了一个residual block，其中x和F(x)通过一个elementwise add操作进行了相加并通过一个relu激活函数得到了这个block的输出。这种连接方式也自然而然引出一个问题，实际量化过程中，如果我们只判断relu激活函数，并在之后插入一个activation量化，这似乎没有什么问题，因为add操作紧邻的relu会被量化。但如果add后面没有relu，那我们就会少插入了一个结点。同样地，如果我们寻找所有的add操作，并在每个add后插入一个activation量化，就会存在add -> relu这样的连接重复插入量化结点的问题。因此，以上现象提示，如果能通过判断结点连接模式的方式来判断是否插入activation量化，就有可能解决以上的问题。
 
 <img src="img/01/residual.png" alt="Residual Block" width="300"/>
 
@@ -179,7 +166,7 @@ def forward(self, input):
 
 那么FX中的量化模式该如何定义？如何在量化过程中发挥作用呢？
 
-关于量化模式的定义都位于torch/quantization/fx/quantization_pattern.py中。以下代码段展示了定义并添加一个简单（单个节点即构成一个模式）的量化模式的方法。对于一个全新的量化模式，我们需要准备两样东西，一个是该模式对应的module表示，也即@register_quant_pattern装饰器传入的参数；另一个是我们需要为这个模式定义相应的QuantizeHandler，以便FX能在convert阶段找到这个模式所对应的转换方法。这里的convert，是指FX在对模型量化完毕之后，转换到相应的量化推理模块（quantized module）的过程，由于我们后面会有专门的篇幅对此进行介绍，在这里便不再展开叙述。不过如果我们只关心量化过程，而不需要或者暂时没有对应的量化推理kernel，QuantizeHandler类的convert部分也可以跳过。
+关于量化模式的定义都位于torch/quantization/fx/quantization_pattern.py中。以下代码段展示了定义并添加一个简单（单个结点即构成一个模式）的量化模式的方法。对于一个全新的量化模式，我们需要准备两样东西，一个是该模式对应的module表示，也即@register_quant_pattern装饰器传入的参数；另一个是我们需要为这个模式定义相应的QuantizeHandler，以便FX能在convert阶段找到这个模式所对应的转换方法。这里的convert，是指FX在对模型量化完毕之后，转换到相应的量化推理模块（quantized module）的过程，由于我们后面会有专门的篇幅对此进行介绍，在这里便不再展开叙述。不过如果我们只关心量化过程，而不需要或者暂时没有对应的量化推理kernel，QuantizeHandler类的convert部分也可以跳过。
 
 ```python
 @register_quant_pattern(torch.cat)
@@ -201,7 +188,7 @@ class Cat(QuantizeHandler):
             'call_function', torch.ops.quantized.cat, load_arg(quantized=[0])(node.args), kwargs)
 ```
 
-当然，有时候很多节点可以复用一个QuantizeHandler，也即它们的convert操作是类似的，这时我们就可以在定义QuantizeHandler的上方对这些模式一起进行注册。不过需要注意的是，由于装饰器的作用顺序问题，会导致处在下方的模式会优先被匹配。
+当然，有时候很多结点可以复用一个QuantizeHandler，也即它们的convert操作是类似的，这时我们就可以在定义QuantizeHandler的上方对这些模式一起进行注册。不过需要注意的是，由于装饰器的作用顺序问题，会导致处在下方的模式会优先被匹配。
 
 
 ```python
@@ -210,7 +197,7 @@ class Cat(QuantizeHandler):
 @register_quant_pattern(torch.nn.intrinsic.qat.ConvBn3d)
 ```
 
-
+两个结点的匹配，以(torch.nn.ReLU, operator.add)为例，该模式匹配：
 
 ```python
 @register_quant_pattern((torch.nn.ReLU, operator.add))
@@ -238,19 +225,19 @@ env: Dict[Any, Any] = {}
 observed_graph = Graph()
 observed_node_names_set: Set[str] = set()
 ```
+- self.activation_post_process_map：记录"结点名 - activation量化"之间的关系
+- env: 一个字典，用于记录"结点名 - 输出结点"的关系
+- observed_graph: Graph module，空图，等待向其中添加结点
+- observed_node_names_set：一个集合，用于记录已经被处理过的结点，防止结点被重复处理
 
-- env: 一个字典，用于记录"节点名 - 输出节点"的关系
-- observed_graph: Graph module，空图，等待向其中添加节点
-- observed_node_names_set：一个集合，用于记录已经被处理过的节点，防止节点被重复处理
+#### **4.3 根据结点类型和QConfig插入量化结点**
 
-#### **4.3 根据节点类型和QConfig插入量化节点**
-
-这是activation量化节点插入环节中最关键也最繁琐的一步，实际上在最新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
+这是activation量化结点插入环节中最关键也最繁琐的一步，实际上在最新的Pytorch实现中，FX开发者已经对这里的逻辑进行了重构，代码更加简洁清晰。不过此处我们仍然按照v1.8.0版本的代码为准，进行解读。
 
 
 **4.3.1 准备工作** *L#461 - L#479*
 
-这里首先定义了一个load_arg函数，实际上这个load_arg函数就是在env中取出对应节点的输出节点。
+这里首先定义了一个load_arg函数，实际上这个load_arg函数就是在env中取出对应结点的输出结点。
 
 ```python
 def load_arg(a):
@@ -275,9 +262,9 @@ result_node : Optional[Node] = None
 ```
 
 
-**4.3.2 处理输出节点** *L#480 - L#504*
+**4.3.2 处理输出结点** *L#480 - L#504*
 
-以下是FX对输出节点的处理逻辑。当FX遇到节点对应的op为输出时，FX会寻找该节点的输入节点，并尝试在这个输入节点的输出上插入一个observer（Fake Quantize）节点。
+以下是FX对输出结点的处理逻辑。当FX遇到结点对应的op为输出时，FX会寻找该结点的输入结点，并尝试在这个输入结点的输出上插入一个observer（Fake Quantize）结点。
 
 ```python
 for node in model.graph.nodes:
@@ -340,13 +327,13 @@ def insert_observer(
     observed_node_names_set.add(node.name)
 ```
 
-在处理输出节点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间节点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
+在处理输出结点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间结点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
 
-从注释部分不难看出，insert_observer函数先是尝试获取到model所在的device，之后便将observer也发送到该device上（保持了device一致，便于后续训练）。随后，根据节点的名字，为需要插入的observer命名，并使用setattr将例化完成的observer添加为model的属性，以便后续调用。而这个observer和节点名称的对应关系也被记录在activation_post_process_map当中。最后便是在相应的图表示上创建相应的节点，这样可以在后续生成代码，这些observer也可以在新代码中被调用。
+从注释部分不难看出，insert_observer函数先是尝试获取到model所在的device，之后便将observer也发送到该device上（保持了device一致，便于后续训练）。随后，根据结点的名字，为需要插入的observer命名，并使用setattr将例化完成的observer添加为model的属性，以便后续调用。而这个observer和结点名称的对应关系也被记录在activation_post_process_map当中。最后便是在相应的图表示上创建相应的结点，这样可以在后续生成代码，这些observer也可以在新代码中被调用。
 
-同时，env中记录的"节点名-输出"的对应关系也从"节点名-当前节点"变成了"节点名-当前节点的observer"。这样后续再次调用load_arg函数查询后继节点的输入参数时，其输入节点便更新成了对应的observer。
+同时，env中记录的"结点名-输出"的对应关系也从"结点名-当前结点"变成了"结点名-当前结点的observer"。这样后续再次调用load_arg函数查询后继结点的输入参数时，其输入结点便更新成了对应的observer。
 
-**4.3.2 处理网络中间层节点** *L#509 - L#529*
+**4.3.2 处理网络中间层结点** *L#509 - L#529*
 
 ```python
 if node.name in observed_node_names_set:
@@ -375,9 +362,9 @@ else:
     env[node.name] = observed_graph.node_copy(node, load_arg)
 ```
 
-**4.3.3 处理输入节点** *L#531 - L#538*
+**4.3.3 处理输入结点** *L#531 - L#538*
 
-输入节点其实并没有做处理。
+输入结点其实并没有做处理。
 
 ```python
 if node.op == 'placeholder':
