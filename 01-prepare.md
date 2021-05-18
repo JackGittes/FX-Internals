@@ -20,6 +20,8 @@
 
 （4）**activation量化结点插入（insert observer）**：此步骤是为了实现对activation的模拟量化（或者在PTQ中插入观察结点，实现对激活值数据分布的观察）。
 
+<img src="img/01/flow.png" alt="Work Flow" width="300"/>
+
 以上即为一个普通的nn.Module转换为一个可进行QAT的graph module的大致流程。本文后续内容将深入每个环节对其中包含的诸多操作进行拆解，条分缕析。
 
 ***
@@ -34,7 +36,9 @@
 
 ### 3. **模块交换（swap）**
 
-#### **3.1 准备工作 —— 传播量化配置（propagate）**
+从模块交换开始，以下内容涉及的代码部分绝大部分在torch/quantization/fx/quantize.py中Quantizer类的_prepare方法中。
+
+#### **3.1 准备工作 —— 传播量化配置（propagate）** *L#423*
     
 传播量化配置的propagate_qconfig_函数接受两个参数作为输入，其一为待量化的graph module，其二为指定module量化方式的flattened_qconfig_dict。
 
@@ -65,7 +69,7 @@ def _propagate_qconfig_helper(module, qconfig_dict, allow_list=None,
                                   module_qconfig, module_prefix)
 ```
 
-#### **3.2 模块替换**
+#### **3.2 模块替换** *L#427*
 
 在传播完成量化配置后，即可将每个nn.Module转换为QAT module，这时候就用到了_qat_swap_module方法。
 
@@ -151,7 +155,7 @@ def forward(self, input):
          input, self._packed_params, self.scale, self.zero_point)
 ```
 
-尽管quantized module也继承自nn.Module，它的forward函数中调用的却并非functional中的可微分操作，而是torch的原生op。而quantized Conv2d原生op（ops.quantized.conv2d）的实现在aten\src\ATen\native\quantized\cpu\qconv_prepack.cpp中。从目录的名也可推知其义，这是一个真正的量化推理操作，只能够运行在cpu上。没错，它是对量化后的网络进行真正量化推理的模块，因而也不没有反向传播（backward）方法和绑定关系。
+尽管quantized module也继承自nn.Module，它的forward函数中调用的却并非functional中的可微分操作，而是torch的原生op。而quantized Conv2d原生op（ops.quantized.conv2d）的实现在aten\src\ATen\native\quantized\cpu\qconv_prepack.cpp中。从目录名也可推知其义，这是一个真正的量化推理操作，只能运行在cpu上。没错，它是对量化后的网络进行量化推理的模块，因而没有反向传播（backward）方法和绑定关系。
 
 ### 4. **activation量化结点插入**
 
@@ -208,21 +212,14 @@ class Cat(QuantizeHandler):
 
 ```python
 @register_quant_pattern((torch.nn.ReLU, operator.add))
-@register_quant_pattern((torch.nn.ReLU, operator.mul))
-@register_quant_pattern((torch.nn.ReLU, torch.add))
-@register_quant_pattern((torch.nn.ReLU, torch.mul))
-@register_quant_pattern((torch.nn.functional.relu, operator.add))
-@register_quant_pattern((torch.nn.functional.relu, operator.mul))
-@register_quant_pattern((torch.nn.functional.relu, torch.add))
-@register_quant_pattern((torch.nn.functional.relu, torch.mul))
 ```
 
-**4.1.3 量化模式的匹配**
+**4.1.3 量化模式的匹配** *L#436 - L#448*
 
 量化模式的匹配过程，我们可以通过find_matches函数来一窥究竟。
 
 
-#### **4.2 创建空图**
+#### **4.2 创建空图** *L#456 - L#459*
 
 以下为FX中创建空图的代码片段，可以看到，在创建空图的同时，还有其他一些变量也随之创建。
 
@@ -336,7 +333,7 @@ def insert_observer(
 
 在处理输出结点的代码中，我们第一次遇到了insert_observer这个函数。实际上，后续有关中间结点的处理中，也会用到这个函数，为此，我们深入insert_observer函数内部，看一下它到底做了些什么。
 
-从注释部分不难看出，insert_observer函数先是尝试获取到model所在的device，之后便将observer也发送到该device上（保持了device一致，便于后续训练）。随后，根据结点的名字，为需要插入的observer命名，并使用setattr将例化完成的observer添加为model的属性，以便后续调用。而这个observer和结点名称的对应关系也被记录在activation_post_process_map当中。最后便是在相应的图表示上创建相应的结点，这样可以在后续生成代码，这些observer也可以在新代码中被调用。
+从注释部分不难看出，insert_observer函数先是尝试获取model所在的device，之后便将observer也发送到该device上（保持device一致，便于后续训练）。随后，根据结点的名字，为需要插入的observer命名，并使用setattr将例化好的observer添加为model的属性，以便后续调用。observer和结点名称的对应关系被记录在activation_post_process_map当中。最后在正被建立的图上创建相应的结点，这样可以在后续生成代码，这些observer也可以在新代码中被调用。
 
 同时，env中记录的"结点名-输出"的对应关系也从"结点名-当前结点"变成了"结点名-当前结点的observer"。这样后续再次调用load_arg函数查询后继结点的输入参数时，其输入结点便更新成了对应的observer。
 
