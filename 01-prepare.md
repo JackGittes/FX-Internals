@@ -218,6 +218,60 @@ class Cat(QuantizeHandler):
 
 量化模式的匹配过程，我们可以通过find_matches函数来一窥究竟。
 
+find_matches的最关键的部分是is_match函数，我们来具体分析一下is_match函数：
+
+```python
+def is_match(modules, node, pattern, max_uses=sys.maxsize):
+    """ Matches a node in fx against a pattern
+    """
+    if isinstance(pattern, tuple):
+        self_match, *arg_matches = pattern
+        if self_match is getattr:
+            assert len(pattern) == 2, 'Expecting getattr pattern to have two elements'
+            arg_matches = []
+    else:
+        self_match = pattern
+        arg_matches = []
+
+    if isinstance(self_match, type) and issubclass(self_match, MatchAllNode):
+        return True
+
+    if len(node.users) > max_uses:
+        return False
+
+    if isinstance(self_match, type) and issubclass(self_match, torch.nn.Module):
+        if node.op != 'call_module':
+            return False
+        if not type(modules[node.target]) == self_match:
+            return False
+    elif callable(self_match):
+        if node.op != 'call_function' or node.target is not self_match:
+            return False
+        elif node.target is getattr:
+            if node.args[1] != pattern[1]:
+                return False
+    elif isinstance(self_match, str):
+        if node.op != 'call_method' or node.target != self_match:
+            return False
+    elif node.target != self_match:
+        return False
+
+    if not arg_matches:
+        return True
+
+    if len(arg_matches) != len(node.args):
+        return False
+
+    return all(is_match(modules, node, arg_match, max_uses=1) for node, arg_match in zip(node.args, arg_matches))
+```
+is_match函数使用一个递归实现，通过对一个pattern包含的各个结点进行分解，并对分解得到的每个module（functional）进行比对，判断当前的node是否满足pattern中的module（functional），并依次递归。当输入的node不断递归其输入参数，并且在其递归过程中每个结点都能和pattern中的类型相匹配时，说明输入结点是该pattern的根结点，因此返回True。
+
+举例，网络拓扑如下所示，pattern定义为(nn.ReLU, nn.Conv2d)。
+x -> conv1 -> bn1 -> relu1 -> conv2 -> relu2 -> out
+
+当输入结点relu1和pattern时，is_match返回False；当输入结点relu2和pattern时，is_match返回True。
+
+此外，torch/quantization/fx/pattern_utils.py当中还定义了一个特殊模块MatchAllNode。当以MatchAllNode作为pattern中的一项时，该位置可以匹配任何类型的结点而不关心其实际的类型，进而可以实现模糊模式匹配。
 
 #### **4.2 创建空图** *L#456 - L#459*
 
