@@ -46,7 +46,7 @@
 propagate_qconfig_(model, flattened_qconfig_dict)
 ```
 
-propagate_qconfig_实际调用的是_propagate_qconfig_helper函数。这是一个递归实现的函数，当module存在named_children时，该函数会递归地为途径到的每个module使用setattr方法增加一个qconfig属性，而这个qconfig属性即来自于我们传入的flattened_qconfig_dict。
+propagate_qconfig_实际调用的是_propagate_qconfig_helper函数。这是一个递归实现的函数，当module存在named_children时，该函数会递归地为途经到的每个module使用setattr方法增加一个qconfig属性，而这个qconfig属性即来自于我们传入的flattened_qconfig_dict。
 
 同时，在实际量化中，网络中各个层的量化配置（权重位宽、激活值位宽等）未必完全相同。为此FX允许用户通过module的名字指定其qconfig。
 
@@ -155,7 +155,7 @@ def forward(self, input):
          input, self._packed_params, self.scale, self.zero_point)
 ```
 
-尽管quantized module也继承自nn.Module，它的forward函数中调用的却并非functional中的可微分操作，而是torch的原生op。而quantized Conv2d原生op（ops.quantized.conv2d）的实现在aten\src\ATen\native\quantized\cpu\qconv_prepack.cpp中。从目录名也可推知其义，这是一个真正的量化推理操作，只能运行在cpu上。没错，它是对量化后的网络进行量化推理的模块，因而没有反向传播（backward）方法和绑定关系。
+尽管quantized module也继承自nn.Module，它的forward函数中调用的却并非functional中的可微分操作，而是torch的原生op。而quantized Conv2d原生op（ops.quantized.conv2d）的实现在aten/src/ATen/native/quantized/cpu/qconv_prepack.cpp中。从目录名也可推知其义，这是一个真正的量化推理操作，只能运行在cpu上。没错，它是对量化后的网络进行量化推理的模块，因而没有反向传播（backward）方法和绑定关系。
 
 ### 4. **activation量化结点插入**
 
